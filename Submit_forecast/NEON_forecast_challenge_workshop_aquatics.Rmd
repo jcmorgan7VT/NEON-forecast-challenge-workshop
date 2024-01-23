@@ -159,7 +159,7 @@ One important step to overcome when thinking about generating forecasts is to in
 
 This code create a connection to the dataset hosted on the eco4cast server (`neon4cast-drivers/noaa/gefs-v12`) using `arrow` functions. To download the data you have to tell the function to `collect()` it. These data set can be subsetted and filtered using `dplyr` functions prior to download to limit the memory usage.
 
-You can read more about the NOAA forecasts available for the NEON sites [here:](https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html)
+You can read more about the NOAA forecasts available for the NEON sites [here:](https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html) (also contains units for data)
 
 ## Download co-variates
 ### Download historic data
@@ -181,6 +181,8 @@ noaa_past <- noaa_past_s3  |>
   dplyr::collect()
 
 noaa_past
+#parameter value is ensemble member number
+#temperature is in K
 ```
 
 This is a stacked ensemble forecast of the one day ahead forecasts. To get an estimate of the historic conditions we can take a mean of these ensembles. We will also need to convert the temperatures to Celsius from Kelvin.
@@ -387,7 +389,7 @@ These include functions for submitting, scoring and reading forecasts:
 
 * `submit()` - submit the forecast file to the neon4cast server where it will be scored
 * `forecast_output_validator()` - will check the file is in the correct format to be submitted
-* `check_submission()` - check that your submission has been uploaded to the server
+
 
 The file name needs to be in the format theme-reference_datetime-model_id
 ```{r eval = T}
@@ -412,7 +414,7 @@ neon4cast::forecast_output_validator(file.path('Forecasts',forecast_file_1))
 ```{r eval = FALSE}
 # can uses the neon4cast::forecast_output_validator() to check the forecast is in the right format
 neon4cast::submit(forecast_file = file.path('Forecasts', forecast_file_1),
-                  ask = FALSE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
+                  ask = TRUE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
 ```
 
 Is the linear model a reasonable relationship between air temperature and water temperature? Would some non-linear relationship be better? What about using yesterday's air and water temperatures to predict tomorrow? Or including additional parameters? There's a lot of variability in water temperatures unexplained by air temperature alone. Could we use the residuals from this fit to add an extra source of uncertainty?
