@@ -45,7 +45,7 @@ targets <- targets %>%
 # Past stacked weather
 noaa_past_s3 <- neon4cast::noaa_stage3()
 
-variables <- c("air_temperature")
+variables <- c("air_temperature", "eastward_wind", "northward_wind")
 #Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
 
 noaa_past <- noaa_past_s3  |> 
@@ -72,7 +72,7 @@ forecast_date <- Sys.Date()
 noaa_date <- forecast_date - days(1)
 
 noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
-variables <- c("air_temperature")
+variables <- c("air_temperature", "eastward_wind", "northward_wind")
 
 noaa_future <- noaa_future_s3 |> 
   dplyr::filter(datetime >= forecast_date,
@@ -88,7 +88,7 @@ noaa_future_daily <- noaa_future |>
   pivot_wider(names_from = variable, values_from = prediction) |>
   # convert to Celsius
   mutate(air_temperature = air_temperature - 273.15) |> 
-  select(datetime, site_id, air_temperature, parameter)
+  select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
 ```
 
 ```{r model-setup}
@@ -116,13 +116,13 @@ for(i in 1:length(lake_sites$field_site_id)) {
     filter(site_id == example_site)
   
   #Fit linear model based on past data: water temperature = m * air temperature + b
-  fit <- lm(site_target$temperature ~ site_target$air_temperature)
+  fit <- lm(site_target$temperature ~ site_target$air_temperature + site_target$eastward_wind + site_target$northward_wind)
   # fit <- lm(site_target$temperature ~ ....)
     
   # use linear regression to forecast water temperature for each ensemble member
-  forecasted_temperature <- fit$coefficients[1] + fit$coefficients[2] * noaa_future_site$air_temperature
+  forecasted_temperature <- fit$coefficients[1] + (fit$coefficients[2] * noaa_future_site$air_temperature) + (fit$coefficients[3] * noaa_future_site$eastward_wind) + (fit$coefficients[4] * noaa_future_site$northward_wind)
     
-  # put all the relavent information into a tibble that we can bind together
+  # put all the relevent information into a tibble that we can bind together
   temperature <- tibble(datetime = noaa_future_site$datetime,
                         site_id = example_site,
                         parameter = noaa_future_site$parameter,
@@ -139,6 +139,8 @@ for(i in 1:length(lake_sites$field_site_id)) {
 # Make forecast fit the EFI standards
 # Remember to change the model_id when you make changes to the model structure!
 my_model_id <- 'example_ID'
+my_model_id2 <- 'example_ID2'
+
 
 temp_lm_forecast_EFI <- temp_lm_forecast %>%
   filter(datetime > forecast_date) %>%
@@ -187,4 +189,14 @@ temp_lm_forecast_EFI |>
   geom_line() +
   facet_wrap(~site_id) +
   labs(title = paste0('Forecast generated for ', temp_lm_forecast_EFI$variable[1], ' on ', temp_lm_forecast_EFI$reference_datetime[1]))
+```
+
+
+```{r, echo=F, warning=F}
+ggplot(targets_lm, aes(x=air_temperature, y= temperature, colour = site_id)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = 'lm') +
+  theme_bw() +
+  facet_wrap(~site_id)
+summary(fit)
 ```
