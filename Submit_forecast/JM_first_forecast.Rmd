@@ -252,39 +252,38 @@ neon4cast::submit(forecast_file = file.path('Forecasts', forecast_file_1),
 ```{r}
 #final plot showing all of my ensemble members with all sources of uncertainty
 #plots of forecasts including uncertainty
-temp_lm_forecast_EFI %>% 
-  filter(variable == 'temperature') %>%
-  ggplot(.,aes(x=datetime, y=prediction, group = parameter)) + 
-  geom_point(data = targets,aes(x=datetime, y=observation, group = 'obs'), colour = 'darkblue') +
-  geom_line(alpha = 0.3, aes(colour = 'ensemble member (parameter)')) + 
-  facet_wrap(~site_id, scales = 'free_y') +
-  scale_x_date(expand = c(0,0), date_labels = "%d %b") +
-  labs(y = 'value') +
-  geom_vline(aes(linetype = 'reference_datetime', xintercept = Sys.Date()), colour = 'blue', size = 1.5) +
-  labs(title = 'site_id', subtitle = 'variable = temperature', caption = 'prediction') + 
-  annotate("text", x = Sys.Date() - days(10), y = 20, label = "past")  +
-  annotate("text", x = Sys.Date() + days(12), y = 20, label = "future")  +
-  theme_bw() +
-  coord_cartesian(xlim = c(min(temp_lm_forecast$datetime) - 15,
-                           Sys.Date() + 30)) +
-  scale_linetype_manual(values = 'dashed', name = '') +
-  scale_colour_manual(values = 'darkgrey', name = '') +
-  theme(strip.text = element_text(colour = 'orange'),
-        axis.title.y = element_text(colour = 'green'),
-        axis.title.x = element_text(colour = 'red'),
-        axis.text.y = element_text(colour = 'purple'),
-        axis.text.x = element_text(colour = 'red'),
-        plot.caption = element_text(hjust = 0, colour = 'purple'),
-        plot.title = element_text(colour = 'orange'), 
-        plot.subtitle = element_text(colour = 'green')) 
-```
+# temp_lm_forecast_EFI %>% 
+#   filter(variable == 'temperature') %>%
+#   ggplot(.,aes(x=datetime, y=prediction, group = parameter)) + 
+#   geom_point(data = targets,aes(x=datetime, y=observation, group = 'obs'), colour = 'darkblue') +
+#   geom_line(alpha = 0.3, aes(colour = 'ensemble member (parameter)')) + 
+#   facet_wrap(~site_id, scales = 'free_y') +
+#   scale_x_date(expand = c(0,0), date_labels = "%d %b") +
+#   labs(y = 'value') +
+#   geom_vline(aes(linetype = 'reference_datetime', xintercept = Sys.Date()), colour = 'blue', size = 1.5) +
+#   labs(title = 'site_id', subtitle = 'variable = temperature', caption = 'prediction') + 
+#   annotate("text", x = Sys.Date() - days(10), y = 20, label = "past")  +
+#   annotate("text", x = Sys.Date() + days(12), y = 20, label = "future")  +
+#   theme_bw() +
+#   coord_cartesian(xlim = c(min(temp_lm_forecast$datetime) - days(15),
+#                            Sys.Date() + days(7))) +
+#   scale_linetype_manual(values = 'dashed', name = '') +
+#   scale_colour_manual(values = 'darkgrey', name = '') +
+#   theme(strip.text = element_text(colour = 'orange'),
+#         axis.title.y = element_text(colour = 'green'),
+#         axis.title.x = element_text(colour = 'red'),
+#         axis.text.y = element_text(colour = 'purple'),
+#         axis.text.x = element_text(colour = 'red'),
+#         plot.caption = element_text(hjust = 0, colour = 'purple'),
+#         plot.title = element_text(colour = 'orange'), 
+targets2 <- filter(targets, datetime >= forecast_date - days(14))
 
-
-```{r, echo=F, warning=F}
-ggplot(targets_lm, aes(x=air_temperature, y= temperature, colour = site_id)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = 'lm') +
-  theme_bw() +
-  facet_wrap(~site_id)
-summary(fit)
+ggplot() +
+    geom_point(data = targets2, aes(x = datetime, y = observation, group = "obs"), color = "black") +
+    geom_line(data = temp_lm_forecast_EFI, aes(x = datetime, y = prediction, group = parameter), color = "grey") +
+    geom_vline(xintercept = as_date(forecast_date), linetype = "dashed") +
+    ylab("Temperature (\u00B0C)") +
+  lims(x = c(forecast_date - days(14), max(temp_lm_forecast_EFI$datetime)))+
+    facet_wrap(~site_id, scales = 'free_y') +
+    theme_bw(base_size = 12)
 ```
