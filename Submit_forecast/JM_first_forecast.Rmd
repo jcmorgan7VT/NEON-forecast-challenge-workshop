@@ -1,5 +1,5 @@
 ---
-title: "NEON forecast challenge submission"
+title: "NEON forecast challenge submission- all sources of  uncertainty"
 output: html_document
 date: "`r Sys.Date()`"
 ---
@@ -104,32 +104,95 @@ temp_lm_forecast <- NULL
 
 ```
 
+
+```{r}
+#code ripped from Mary's module 6, set up for including uncertainty
+forecast_start_date <- forecast_date
+
+
+#number of days we are predicting into the future
+forecast_horizon <- 7
+#vector of dates that we want to predict for
+forecasted_dates <- seq(from = ymd(forecast_start_date), to = ymd(forecast_start_date) + forecast_horizon, by = "day")
+```
+
+
 ```{r forecast-loop}
+forecast_df <- NULL
+#for loop to fit a linear regression on every site
 for(i in 1:length(lake_sites$field_site_id)) {  
   
   example_site <- lake_sites$field_site_id[i]
   
+  #past data to build the lm
   site_target <- targets_lm |>
     filter(site_id == example_site)
 
+  #future data to run on the lm
   noaa_future_site <- noaa_future_daily |> 
-    filter(site_id == example_site)
+    filter(site_id == example_site) %>% 
+    filter(datetime <= max(forecasted_dates))
   
-  #Fit linear model based on past data: water temperature = m * air temperature + b
+  #fitting linear model to past data
   fit <- lm(site_target$temperature ~ site_target$air_temperature + site_target$eastward_wind + site_target$northward_wind)
-  # fit <- lm(site_target$temperature ~ ....)
-    
-  # use linear regression to forecast water temperature for each ensemble member
-  forecasted_temperature <- fit$coefficients[1] + (fit$coefficients[2] * noaa_future_site$air_temperature) + (fit$coefficients[3] * noaa_future_site$eastward_wind) + (fit$coefficients[4] * noaa_future_site$northward_wind)
-    
-  # put all the relevent information into a tibble that we can bind together
-  temperature <- tibble(datetime = noaa_future_site$datetime,
-                        site_id = example_site,
-                        parameter = noaa_future_site$parameter,
-                        prediction = forecasted_temperature,
-                        variable = "temperature")
+  fit_sum <- summary(fit)
+  fit_sum_df <- as.data.frame(fit_sum$coefficients)
   
-  temp_lm_forecast <- dplyr::bind_rows(temp_lm_forecast, temperature)
+  #coeffs <- round(fit$coefficients, 2)
+  coeffs <- fit_sum_df[,1]
+  params_se <- fit_sum_df[,2]
+
+
+  #create df containing distribution of parameter uncertainty, done for each new lm for each site
+  param_df <- data.frame(b_beta = rnorm(31, coeffs[1], params_se[1]),
+                         airT_beta = rnorm(31, coeffs[2], params_se[2]),
+                         eWind_beta = rnorm(31, coeffs[3], params_se[3]),
+                         nWind_beta = rnorm(31, coeffs[4], params_se[4]))
+
+  #Process uncertainty- uncertainty due to how we model or represent this system
+  residuals <- predict(fit, site_target)
+  sigma <- sd(residuals, na.rm = TRUE) # Process Uncertainty Noise Std Dev.; this is your sigma
+  process_unc <- rnorm(n = 31, mean = 0, sd = sigma)
+
+  # initial condition uncertainty- not included bc I don't have any antecedent conditions
+  #ic_sd <- 0.1 
+  #ic_uc <- rnorm(n = n_members, mean = curr_wt, sd = ic_sd)
+
+  #run a model run for each ensemble member, incorporating the different sources of uncertainty
+  for(x in 1:length(forecasted_dates)) {
+    # use linear regression to forecast water temperature for each ensemble member
+    #iterating through each day, so filter for day each day individually to predict
+    site_drivers <- noaa_future_site %>%
+      filter(datetime == forecasted_dates[x]) %>% 
+      bind_cols(param_df)
+    #defining components of the multi-linear regression- using ones with uncertainty
+    b <- site_drivers$b_beta
+    airT <- site_drivers$air_temperature * site_drivers$airT_beta
+    east <- site_drivers$eastward_wind * site_drivers$eWind_beta
+    west <- site_drivers$northward_wind * site_drivers$nWind_beta
+
+    #multi linear regression
+    forecasted_temperature <- b + airT + east + west + process_unc
+    
+    # put all the relevant information into a tibble that we can bind together
+    # site_drivers$prediction <- forecasted_temperature
+    # if(x == 1) loop2 <- site_drivers
+    # if(x > 1) loop2 <- dplyr::bind_rows(loop2, site_drivers)
+    
+    curr_site_df <- tibble(datetime = rep(forecasted_dates[x], times = 31),
+                         site_id = example_site,
+                         parameter = 0:30,
+                         prediction = forecasted_temperature,
+                         variable = "temperature") #Change this if you are forecasting a different variable
+  
+  forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
+    
+
+  }
+    
+  
+  
+  #temp_lm_forecast <- dplyr::bind_rows(temp_lm_forecast, loop2)
   message(example_site, ' temperature forecast run')
   
 }
@@ -142,12 +205,13 @@ my_model_id <- 'example_ID'
 my_model_id2 <- 'example_ID2'
 
 
-temp_lm_forecast_EFI <- temp_lm_forecast %>%
+temp_lm_forecast_EFI <- forecast_df %>%
   filter(datetime > forecast_date) %>%
   mutate(model_id = my_model_id,
          reference_datetime = forecast_date,
          family = 'ensemble',
-         parameter = as.character(parameter)) %>%
+         parameter = as.character(parameter),
+         variable = "temperature") %>%
   select(datetime, reference_datetime, site_id, family, parameter, variable, prediction, model_id)
 
 ```
@@ -177,18 +241,42 @@ neon4cast::forecast_output_validator(file.path('Forecasts',forecast_file_1))
 ## # can uses the neon4cast::forecast_output_validator() to check the forecast is in the right format
 
 # UNCOMMMENT THIS WHEN YOU ARE READY TO SUBMIT
-## neon4cast::submit(forecast_file = file.path('Forecasts', forecast_file_1),
-##                   ask = FALSE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
+neon4cast::submit(forecast_file = file.path('Forecasts', forecast_file_1),
+                   ask = FALSE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
 
 
 ```
 
-```{r plot-forecast}
-temp_lm_forecast_EFI |> 
-  ggplot(aes(x=datetime, y=prediction, group = parameter)) +
-  geom_line() +
-  facet_wrap(~site_id) +
-  labs(title = paste0('Forecast generated for ', temp_lm_forecast_EFI$variable[1], ' on ', temp_lm_forecast_EFI$reference_datetime[1]))
+
+
+```{r}
+#final plot showing all of my ensemble members with all sources of uncertainty
+#plots of forecasts including uncertainty
+temp_lm_forecast_EFI %>% 
+  filter(variable == 'temperature') %>%
+  ggplot(.,aes(x=datetime, y=prediction, group = parameter)) + 
+  geom_point(data = targets,aes(x=datetime, y=observation, group = 'obs'), colour = 'darkblue') +
+  geom_line(alpha = 0.3, aes(colour = 'ensemble member (parameter)')) + 
+  facet_wrap(~site_id, scales = 'free_y') +
+  scale_x_date(expand = c(0,0), date_labels = "%d %b") +
+  labs(y = 'value') +
+  geom_vline(aes(linetype = 'reference_datetime', xintercept = Sys.Date()), colour = 'blue', size = 1.5) +
+  labs(title = 'site_id', subtitle = 'variable = temperature', caption = 'prediction') + 
+  annotate("text", x = Sys.Date() - days(10), y = 20, label = "past")  +
+  annotate("text", x = Sys.Date() + days(12), y = 20, label = "future")  +
+  theme_bw() +
+  coord_cartesian(xlim = c(min(temp_lm_forecast$datetime) - 15,
+                           Sys.Date() + 30)) +
+  scale_linetype_manual(values = 'dashed', name = '') +
+  scale_colour_manual(values = 'darkgrey', name = '') +
+  theme(strip.text = element_text(colour = 'orange'),
+        axis.title.y = element_text(colour = 'green'),
+        axis.title.x = element_text(colour = 'red'),
+        axis.text.y = element_text(colour = 'purple'),
+        axis.text.x = element_text(colour = 'red'),
+        plot.caption = element_text(hjust = 0, colour = 'purple'),
+        plot.title = element_text(colour = 'orange'), 
+        plot.subtitle = element_text(colour = 'green')) 
 ```
 
 
