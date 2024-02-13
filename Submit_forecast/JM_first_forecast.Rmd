@@ -150,7 +150,8 @@ for(i in 1:length(lake_sites$field_site_id)) {
                          nWind_beta = rnorm(31, coeffs[4], params_se[4]))
 
   #Process uncertainty- uncertainty due to how we model or represent this system
-  residuals <- predict(fit, site_target)
+  mod <- predict(fit, site_target)
+  residuals <- mod - site_target$temperature
   sigma <- sd(residuals, na.rm = TRUE) # Process Uncertainty Noise Std Dev.; this is your sigma
   process_unc <- rnorm(n = 31, mean = 0, sd = sigma)
 
@@ -280,10 +281,16 @@ targets2 <- filter(targets, datetime >= forecast_date - days(14))
 
 ggplot() +
     geom_point(data = targets2, aes(x = datetime, y = observation, group = "obs"), color = "black") +
-    geom_line(data = temp_lm_forecast_EFI, aes(x = datetime, y = prediction, group = parameter), color = "grey") +
+    geom_line(data = temp_lm_forecast_EFI, aes(x = datetime, y = prediction, group = parameter), color = "grey", alpha = 0.2) +
     geom_vline(xintercept = as_date(forecast_date), linetype = "dashed") +
     ylab("Temperature (\u00B0C)") +
   lims(x = c(forecast_date - days(14), max(temp_lm_forecast_EFI$datetime)))+
     facet_wrap(~site_id, scales = 'free_y') +
     theme_bw(base_size = 12)
+
+#funnel shape occurs when you have initial conditions, and when your driver uncertainty is high- when you have something sensitive to weather conditions
+
+#adding the concept will reduce initial uncertainty
+
+# to add more ensemble members- randomly sample with replacement of noaa predictions, up to however many ensemble members you want. IF ensemble members are not equally likely, then you need to incorporate weighting.
 ```
