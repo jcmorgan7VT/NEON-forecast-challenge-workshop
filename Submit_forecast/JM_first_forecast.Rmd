@@ -281,7 +281,7 @@ targets2 <- filter(targets, datetime >= forecast_date - days(14))
 
 ggplot() +
     geom_point(data = targets2, aes(x = datetime, y = observation, group = "obs"), color = "black") +
-    geom_line(data = temp_lm_forecast_EFI, aes(x = datetime, y = prediction, group = parameter), color = "grey", alpha = 0.2) +
+    geom_line(data = temp_lm_forecast_EFI, aes(x = datetime, y = prediction, group = parameter), color = "grey", alpha = 0.9) +
     geom_vline(xintercept = as_date(forecast_date), linetype = "dashed") +
     ylab("Temperature (\u00B0C)") +
   lims(x = c(forecast_date - days(14), max(temp_lm_forecast_EFI$datetime)))+
