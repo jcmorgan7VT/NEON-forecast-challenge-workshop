@@ -131,22 +131,28 @@ noaa_past_mean <- noaa_past |>
   summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
   pivot_wider(names_from = variable, values_from = prediction) |> 
   # convert air temp to C
-  mutate(air_temperature = air_temperature - 273.15)
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  dplyr::filter(site_id == site & datetime < start)
 
-#atmospheric drivers to my horizon date
-forecast_starts <- noaa_past_mean |> 
-  dplyr::filter(site_id == site & datetime < horizon) |> 
-  left_join(targets_use, by = join_by(datetime))
+#data input to train the model
+##########
 
 tail(as.data.frame(forecast_starts))
 #convert targets into a time-series tibble
 targets_use <- targets |> 
   dplyr::filter(site_id == site,
                 variable == var,
-                datetime < start) %>%
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
-  select(datetime, observation) |> 
-  tsibble::fill_gaps()   # add NA values up to today (index)
+                datetime < start)  |> 
+  right_join(noaa_past_mean, by = join_by(datetime)) #|> 
+  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
+  #tsibble::fill_gaps()   # add NA values up to today (index)
+
+#atmospheric drivers to my horizon date
+forecast_starts <- noaa_past_mean |> 
+   |> 
+  left_join(targets_use, by = join_by(datetime)) |> 
+  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
+##########
 
 #get actual observationgs to see how good my model performed
 actual_obs <- targets |> 
@@ -155,8 +161,8 @@ actual_obs <- targets |>
                 datetime < horizon)
 
 #set up what model to use- example is RW, for random walk
-RW_model <- targets_use |> 
-  fabletools::model(RW = fable::RW(observation ~ drift())) 
+RW_model <- forecast_starts |> 
+  fabletools::model(RW = fable::RW(observation ~ air_pressure + air_temperature + eastward_wind + northward_wind + precipitation_flux + relative_humidity + surface_downwelling_longwave_flux_in_air + surface_downwelling_shortwave_flux_in_air + drift())) 
 
 #generate a forecast for h number of time steps into the future
 #need to iterate through each ensemble member maybe 10 times each
