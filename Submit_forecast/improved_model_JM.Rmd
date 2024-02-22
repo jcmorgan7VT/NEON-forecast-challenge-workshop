@@ -17,13 +17,14 @@ knitr::opts_chunk$set(echo = TRUE)
 ## install.packages('tsibble') # package for dealing with time series data sets and tsibble objects
 ## install.packages('tidyverse') # collection of R packages for data manipulation, analysis, and visualisation
 ## install.packages('lubridate') # working with dates and times
-## remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
+remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
 
 # Load packages
 library(tidyverse)
 library(lubridate)
 library(tsibble)
 library(fable)
+library(neon4cast)
 
 ```
 
@@ -56,9 +57,109 @@ targets_use <- targets |>
 
 #set up what model to use- example is RW, for random walk
 RW_model <- targets_use |> 
+  fabletools::model(RW = fable::ARIMA(observation ~ drift())) 
+
+#generate a forecast for h number of time steps into the future
+forecast <- RW_model |>  
+  fabletools::generate(h = forecast_starts$h, bootstrap = T, times = 10)
+
+#reformat forecast
+RW_forecasts_EFI <- forecast %>%
+  rename(parameter = .rep,
+         prediction = .sim) %>%
+  # For the EFI challenge we only want the forecast for future
+  #filter(datetime > Sys.Date()) %>%
+  group_by(site_id, variable) %>%
+  mutate(reference_datetime = Sys.Date(),
+         family = "ensemble",
+         model_id = "persistenceRW") %>%
+  select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
+
+#plot forecast
+RW_forecasts_EFI |>
+  filter(variable == "temperature") |>
+  ggplot(aes(x = datetime, y = prediction, group = parameter)) +
+  geom_line() + 
+  geom_vline(aes(xintercept = reference_datetime), color = "blue") +
+  facet_wrap(~site_id)
+```
+
+Above code works, but I am going to try the machine learning techniques with all of the possible input variables
+```{r}
+#pick an arbitrary day to start
+start <- ymd("2023-07-01")
+horizon <- ymd("2023-7-31")
+
+#copying fable method from text book
+#set up targets
+targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
+                    show_col_types = FALSE)
+max_horizon <- 31 #h from Quinn's script
+var <- "temperature"
+site <- "BARC"
+
+# read in the sites data
+aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
+  dplyr::filter(aquatics == 1)
+
+lake_sites <- aquatic_sites %>%
+  filter(field_site_subtype == 'Lake')
+
+# Past stacked weather
+noaa_past_s3 <- neon4cast::noaa_stage3()
+
+variables <- c("air_temperature", 
+               "air_pressure",
+               "relative_humidity",
+               "surface_downwelling_longwave_flux_in_air",
+               "surface_downwelling_shortwave_flux_in_air",
+               "precipitation_flux",
+               "eastward_wind", 
+               "northward_wind")
+#Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
+
+noaa_past <- noaa_past_s3  |> 
+  dplyr::filter(site_id %in% lake_sites$field_site_id,
+                datetime >= ymd('2017-01-01'),
+                variable %in% variables) |> 
+  dplyr::collect()
+
+# aggregate the past to mean values
+noaa_past_mean <- noaa_past |> 
+  mutate(datetime = as_date(datetime)) |> 
+  group_by(datetime, site_id, variable) |> 
+  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+  pivot_wider(names_from = variable, values_from = prediction) |> 
+  # convert air temp to C
+  mutate(air_temperature = air_temperature - 273.15)
+
+#atmospheric drivers to my horizon date
+forecast_starts <- noaa_past_mean |> 
+  dplyr::filter(site_id == site & datetime < horizon) |> 
+  left_join(targets_use, by = join_by(datetime))
+
+tail(as.data.frame(forecast_starts))
+#convert targets into a time-series tibble
+targets_use <- targets |> 
+  dplyr::filter(site_id == site,
+                variable == var,
+                datetime < start) %>%
+  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
+  select(datetime, observation) |> 
+  tsibble::fill_gaps()   # add NA values up to today (index)
+
+#get actual observationgs to see how good my model performed
+actual_obs <- targets |> 
+  dplyr::filter(site_id == site,
+                variable == var,
+                datetime < horizon)
+
+#set up what model to use- example is RW, for random walk
+RW_model <- targets_use |> 
   fabletools::model(RW = fable::RW(observation ~ drift())) 
 
 #generate a forecast for h number of time steps into the future
+#need to iterate through each ensemble member maybe 10 times each
 forecast <- RW_model |>  
   fabletools::generate(h = forecast_starts$h, bootstrap = T, times = 200)
 
@@ -83,6 +184,8 @@ RW_forecasts_EFI |>
   facet_wrap(~site_id)
 ```
 
+
+
 ```{r get-targets, message=F}
 #read in the targets data
 targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz')
@@ -100,7 +203,6 @@ targets <- targets %>%
          variable == 'temperature')
 ```
 
-Above code works
 
 ```{r get-NOAA-past, message = F}
 
