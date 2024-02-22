@@ -22,7 +22,65 @@ knitr::opts_chunk$set(echo = TRUE)
 # Load packages
 library(tidyverse)
 library(lubridate)
+library(tsibble)
+library(fable)
 
+```
+
+```{r}
+#copying fable method from text book
+#set up targets
+targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
+                    show_col_types = FALSE)
+max_horizon <- 35
+var <- "temperature"
+site <- "BARC"
+
+#calculate the horizon
+forecast_starts <- targets |> 
+  dplyr::filter(!is.na(observation) & site_id == site & variable == var) |> 
+  # Start the day after the most recent non-NA value
+  dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
+  dplyr::mutate(h = (Sys.Date() - start_date) + max_horizon,
+                h = as.numeric(h)) |>  # Horizon value
+  dplyr::ungroup()
+
+forecast_starts
+
+#convert targets into a time-series tibble
+targets_use <- targets |> 
+  dplyr::filter(site_id == site,
+                variable == var) %>%
+  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |> 
+  tsibble::fill_gaps()   # add NA values up to today (index)
+
+#set up what model to use- example is RW, for random walk
+RW_model <- targets_use |> 
+  fabletools::model(RW = fable::RW(observation ~ drift())) 
+
+#generate a forecast for h number of time steps into the future
+forecast <- RW_model |>  
+  fabletools::generate(h = forecast_starts$h, bootstrap = T, times = 200)
+
+#reformat forecast
+RW_forecasts_EFI <- forecast %>%
+  rename(parameter = .rep,
+         prediction = .sim) %>%
+  # For the EFI challenge we only want the forecast for future
+  #filter(datetime > Sys.Date()) %>%
+  group_by(site_id, variable) %>%
+  mutate(reference_datetime = Sys.Date(),
+         family = "ensemble",
+         model_id = "persistenceRW") %>%
+  select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
+
+#plot forecast
+RW_forecasts_EFI |>
+  filter(variable == "temperature") |>
+  ggplot(aes(x = datetime, y = prediction, group = parameter)) +
+  geom_line() + 
+  geom_vline(aes(xintercept = reference_datetime), color = "blue") +
+  facet_wrap(~site_id)
 ```
 
 ```{r get-targets, message=F}
@@ -41,6 +99,8 @@ targets <- targets %>%
   filter(site_id %in% lake_sites$field_site_id,
          variable == 'temperature')
 ```
+
+Above code works
 
 ```{r get-NOAA-past, message = F}
 
