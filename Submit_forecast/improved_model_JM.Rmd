@@ -17,7 +17,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ## install.packages('tsibble') # package for dealing with time series data sets and tsibble objects
 ## install.packages('tidyverse') # collection of R packages for data manipulation, analysis, and visualisation
 ## install.packages('lubridate') # working with dates and times
-remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
+#remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
 
 # Load packages
 library(tidyverse)
@@ -25,6 +25,8 @@ library(lubridate)
 library(tsibble)
 library(fable)
 library(neon4cast)
+library(feasts)
+library(urca)
 
 ```
 
@@ -143,31 +145,53 @@ targets_use <- targets |>
   dplyr::filter(site_id == site,
                 variable == var,
                 datetime < start)  |> 
-  right_join(noaa_past_mean, by = join_by(datetime)) #|> 
-  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
-  #tsibble::fill_gaps()   # add NA values up to today (index)
+  left_join(noaa_past_mean, by = join_by(datetime, site_id)) |> 
+  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
+  tsibble::fill_gaps()   # add NA values up to today (index)
 
 #atmospheric drivers to my horizon date
-forecast_starts <- noaa_past_mean |> 
-   |> 
-  left_join(targets_use, by = join_by(datetime)) |> 
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
+#forecast_starts <- noaa_past_mean |> 
+  #dplyr::filter(datetime <= start) #|> 
+  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
 ##########
 
 #get actual observationgs to see how good my model performed
 actual_obs <- targets |> 
   dplyr::filter(site_id == site,
                 variable == var,
-                datetime < horizon)
+                datetime >= start,
+                datetime <= horizon)
 
 #set up what model to use- example is RW, for random walk
-RW_model <- forecast_starts |> 
-  fabletools::model(RW = fable::RW(observation ~ air_pressure + air_temperature + eastward_wind + northward_wind + precipitation_flux + relative_humidity + surface_downwelling_longwave_flux_in_air + surface_downwelling_shortwave_flux_in_air + drift())) 
+RW_model <-  model(auto_ets = fable::ETS(targets_use))
 
+    fabletools::model(RW = fable::RW(observation))
+
+    
+fit <- targets_use %>% 
+  fabletools::model(
+    arima = ARIMA(observation),
+    auto = auto_ml(observation, mode = "unknown", engine = "h2o"),
+    lm = TSLM(observation ~ trend() + season())
+  )
+fit
+
+fc <- fit %>% 
+  forecast(h = max_horizon)
+fc
+
+fc %>% 
+  hilo(level = c(80, 95))
+
+fc %>% 
+  autoplot(targets_use)
+#   fabletools::model(linear_reg = fable::linear_reg(observation ~ air_pressure + air_temperature + eastward_wind + northward_wind + precipitation_flux + relative_humidity + surface_downwelling_longwave_flux_in_air + surface_downwelling_shortwave_flux_in_air + drift())) 
+# 
+# test <- fable::linear_reg(mode = "regression", engine = "lm", penalty = NULL, mixture = NULL)
 #generate a forecast for h number of time steps into the future
 #need to iterate through each ensemble member maybe 10 times each
 forecast <- RW_model |>  
-  fabletools::generate(h = forecast_starts$h, bootstrap = T, times = 200)
+  fabletools::generate(h = max_horizon, bootstrap = T, times = 200)
 
 #reformat forecast
 RW_forecasts_EFI <- forecast %>%
@@ -464,3 +488,5 @@ ggplot() +
 
 # to add more ensemble members- randomly sample with replacement of noaa predictions, up to however many ensemble members you want. IF ensemble members are not equally likely, then you need to incorporate weighting.
 ```
+
+Describe what I did at the bottom of the Markdown, deadline is Thursday at midnight
