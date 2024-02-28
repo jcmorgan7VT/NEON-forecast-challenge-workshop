@@ -385,6 +385,14 @@ btrain |>
   geom_point(data = btest,  aes(x = datetime, y = observation))
 #doesn't work when I do forecast- is this because it is missing the lagged and air_temperature?
 
+my_model <- btrain |>
+  model(tslm = TSLM(observation ~ air_temperature + lag(observation)))
+
+my_model |> 
+  generate(h = "31 days", new_data = btest) |> 
+  autoplot(.sim)+
+  geom_point(data = btest,  aes(x = datetime, y = observation))
+
 
 augment(bfit) |>
   ggplot(aes(x = datetime)) +
