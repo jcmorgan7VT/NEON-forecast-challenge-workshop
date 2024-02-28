@@ -32,255 +32,36 @@ library(urca)
 
 ```
 
-```{r}
-#copying fable method from text book
-#set up targets
-targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
-                    show_col_types = FALSE)
-max_horizon <- 35
-var <- "temperature"
-site <- "BARC"
-
-#calculate the horizon
-forecast_starts <- targets |> 
-  dplyr::filter(!is.na(observation) & site_id == site & variable == var) |> 
-  # Start the day after the most recent non-NA value
-  dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
-  dplyr::mutate(h = (Sys.Date() - start_date) + max_horizon,
-                h = as.numeric(h)) |>  # Horizon value
-  dplyr::ungroup()
-
-forecast_starts
-
-#convert targets into a time-series tibble
-targets_use <- targets |> 
-  dplyr::filter(site_id == site,
-                variable == var) %>%
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |> 
-  tsibble::fill_gaps()   # add NA values up to today (index)
-
-#set up what model to use- example is RW, for random walk
-RW_model <- targets_use |> 
-  fabletools::model(RW = fable::ARIMA(observation ~ drift())) 
-
-#generate a forecast for h number of time steps into the future
-forecast <- RW_model |>  
-  fabletools::generate(h = forecast_starts$h, bootstrap = T, times = 10)
-
-#reformat forecast
-RW_forecasts_EFI <- forecast %>%
-  rename(parameter = .rep,
-         prediction = .sim) %>%
-  # For the EFI challenge we only want the forecast for future
-  #filter(datetime > Sys.Date()) %>%
-  group_by(site_id, variable) %>%
-  mutate(reference_datetime = Sys.Date(),
-         family = "ensemble",
-         model_id = "persistenceRW") %>%
-  select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
-
-#plot forecast
-RW_forecasts_EFI |>
-  filter(variable == "temperature") |>
-  ggplot(aes(x = datetime, y = prediction, group = parameter)) +
-  geom_line() + 
-  geom_vline(aes(xintercept = reference_datetime), color = "blue") +
-  facet_wrap(~site_id)
-```
-
-Above code works, but I am going to try the machine learning techniques with all of the possible input variables
-```{r}
-#pick an arbitrary day to start
-start <- ymd("2023-07-01")
-horizon <- ymd("2023-7-31")
-
-#copying fable method from text book
-#set up targets
-targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
-                    show_col_types = FALSE)
-max_horizon <- 31 #h from Quinn's script
-var <- "temperature"
-site <- "BARC"
-
-# read in the sites data
-aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
-  dplyr::filter(aquatics == 1)
-
-lake_sites <- aquatic_sites %>%
-  filter(field_site_subtype == 'Lake')
-
-# Past stacked weather
-noaa_past_s3 <- neon4cast::noaa_stage3()
-
-variables <- c("air_temperature", 
-               "air_pressure",
-               "relative_humidity",
-               "surface_downwelling_longwave_flux_in_air",
-               "surface_downwelling_shortwave_flux_in_air",
-               "precipitation_flux",
-               "eastward_wind", 
-               "northward_wind")
-#Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
-
-noaa_past <- noaa_past_s3  |> 
-  dplyr::filter(site_id %in% lake_sites$field_site_id,
-                datetime >= ymd('2017-01-01'),
-                variable %in% variables) |> 
-  dplyr::collect()
-
-# aggregate the past to mean values
-noaa_past_mean <- noaa_past |> 
-  mutate(datetime = as_date(datetime)) |> 
-  group_by(datetime, site_id, variable) |> 
-  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
-  pivot_wider(names_from = variable, values_from = prediction) |> 
-  # convert air temp to C
-  mutate(air_temperature = air_temperature - 273.15) |> 
-  dplyr::filter(datetime < start) #site_id == site & 
-
-forecast_sites <- unique(noaa_past_mean$site_id)
-#data input to train the model
-##########
-#add a lagged temperature column
-
-#convert targets into a time-series tibble
-targets_use <- targets |> 
-  dplyr::filter(site_id %in% forecast_sites,
-                variable == var,
-                datetime < start)  |> 
-  group_by(site_id) |> 
-  mutate(lagged = lag(observation, default = NA))|> 
-  left_join(noaa_past_mean, by = join_by(datetime, site_id)) |> 
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
-  tsibble::fill_gaps()   # add NA values up to today (index)
-
-
-
-ggplot(targets_use)+
-  geom_point(aes(x = lagged, y = observation), alpha = 0.2, color = "grey")+
-  facet_wrap(~site_id)
-#atmospheric drivers to my horizon date
-#forecast_starts <- noaa_past_mean |> 
-  #dplyr::filter(datetime <= start) #|> 
-  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
-##########
-
-#get actual observationgs to see how good my model performed
-actual_obs <- targets |> 
-  dplyr::filter(site_id %in% forecast_sites,
-                variable == var,
-                datetime >= start,
-                datetime <= horizon) |> 
-  group_by(site_id) |> 
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
-  tsibble::fill_gaps()
-
-
-#right now I am training off of the actual observations, need to be training off of the NOAA level 3 forecasts
-fit <- targets_use %>% 
-  fabletools::model(
-    #arima = ARIMA(observation),
-    lm = TSLM(observation ~ trend() + season()),
-    var = VAR(observation)
-  )
-
-fc <- fit %>% 
-  forecast(h = max_horizon)
-fc
-
-fc %>% 
-  hilo(level = 95)
-
-filter(fc, site_id == "PRLA") %>% 
-  autoplot(targets_use |> 
-             ungroup() |> 
-             filter(datetime >= start,
-                    datetime <= horizon,
-                    site_id == "BARC"))+
-  facet_wrap(~.model, ncol = 1)+
-  geom_point(data = filter(actual_obs, site_id == "PRLA"), aes(x = datetime, y = observation))
-
-
-actual_obs |> 
-  autoplot(observation)+
-  facet_wrap(~site_id, ncol = 1)
-
-actual_obs |> 
-  autolayer(observation) |> 
-  autolayer(fc)
-#   fabletools::model(linear_reg = fable::linear_reg(observation ~ air_pressure + air_temperature + eastward_wind + northward_wind + precipitation_flux + relative_humidity + surface_downwelling_longwave_flux_in_air + surface_downwelling_shortwave_flux_in_air + drift())) 
-# 
-# test <- fable::linear_reg(mode = "regression", engine = "lm", penalty = NULL, mixture = NULL)
-#generate a forecast for h number of time steps into the future
-#need to iterate through each ensemble member maybe 10 times each
-forecast <- RW_model |>  
-  fabletools::generate(h = max_horizon, bootstrap = T, times = 200)
-
-#reformat forecast
-RW_forecasts_EFI <- forecast %>%
-  rename(parameter = .rep,
-         prediction = .sim) %>%
-  # For the EFI challenge we only want the forecast for future
-  #filter(datetime > Sys.Date()) %>%
-  group_by(site_id, variable) %>%
-  mutate(reference_datetime = Sys.Date(),
-         family = "ensemble",
-         model_id = "persistenceRW") %>%
-  select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
-
-#plot forecast
-RW_forecasts_EFI |>
-  filter(variable == "temperature") |>
-  ggplot(aes(x = datetime, y = prediction, group = parameter)) +
-  geom_line() + 
-  geom_vline(aes(xintercept = reference_datetime), color = "blue") +
-  facet_wrap(~site_id)
-```
-
 
 
 ```{r}
 #final version of my forecast code
 
-#seperate training and test data (in the case of forecasts, test data is unknown)
-#trying again
-
 # read in the sites data
+#get the names of the lakes that I am supposed to forecast
 aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
   dplyr::filter(aquatics == 1)
-#pick an arbitrary day to start
-start <- ymd("2023-07-01")
-horizon <- ymd("2023-7-31")
+lake_sites <- aquatic_sites %>%
+  filter(field_site_subtype == 'Lake')
 
-#copying fable method from text book
 #set up targets
 targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
                     show_col_types = FALSE)
-max_horizon <- 31 #h from Quinn's script
-var <- "temperature"
-site <- "BARC"
 
-
-lake_sites <- aquatic_sites %>%
-  filter(field_site_subtype == 'Lake')
+# Filter the targets
+targets <- targets %>%
+  filter(site_id %in% lake_sites$field_site_id,
+         variable == 'temperature')
 
 # Past stacked weather
 noaa_past_s3 <- neon4cast::noaa_stage3()
 
-variables <- c("air_temperature", 
-               "air_pressure",
-               "relative_humidity",
-               "surface_downwelling_longwave_flux_in_air",
-               "surface_downwelling_shortwave_flux_in_air",
-               "precipitation_flux",
-               "eastward_wind", 
-               "northward_wind")
-#Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
+variables <- c("air_temperature")
 
 noaa_past <- noaa_past_s3  |> 
   dplyr::filter(site_id %in% lake_sites$field_site_id,
                 datetime >= ymd('2017-01-01'),
-                variable %in% variables) |> 
+                variable == variables) |> 
   dplyr::collect()
 
 # aggregate the past to mean values
@@ -294,16 +75,31 @@ noaa_past_mean <- noaa_past |>
   dplyr::filter(datetime < start) #site_id == site & 
 
 forecast_sites <- unique(noaa_past_mean$site_id)
-#data input to train the model
-##########
-#add a lagged temperature column
 
 
-#atmospheric drivers to my horizon date
-#forecast_starts <- noaa_past_mean |> 
-  #dplyr::filter(datetime <= start) #|> 
-  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
-##########
+# Future weather- get future weather to make forecast
+# New forecast only available at 5am UTC the next day
+forecast_date <- Sys.Date() 
+noaa_date <- forecast_date - days(1)
+
+noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
+variables <- c("air_temperature")
+
+noaa_future <- noaa_future_s3 |> 
+  dplyr::filter(datetime >= forecast_date,
+                site_id %in% lake_sites$field_site_id,
+                variable %in% variables) |> 
+  collect()
+
+noaa_future_daily <- noaa_future |> 
+  mutate(datetime = as_date(datetime)) |> 
+  # mean daily forecasts at each site per ensemble
+  group_by(datetime, site_id, parameter, variable) |> 
+  summarize(prediction = mean(prediction)) |>
+  pivot_wider(names_from = variable, values_from = prediction) |>
+  # convert to Celsius
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
 
 #get actual observationgs to see how good my model performed
 actual_obs <- targets |> 
@@ -321,6 +117,9 @@ max_horizon <- 35
 var <- "temperature"
 site <- "BARC"
 
+#pick an arbitrary day to start
+start <- ymd("2023-07-01")
+horizon <- ymd("2023-7-31")
 #calculate the horizon
 forecast_starts <- targets |> 
   dplyr::filter(!is.na(observation) & site_id == site & variable == var) |> 
@@ -390,74 +189,6 @@ RW_forecasts_EFI <- forecast %>%
   select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
 ```
 
-```{r get-targets, message=F}
-#read in the targets data
-targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz')
-
-# read in the sites data
-aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
-  dplyr::filter(aquatics == 1)
-
-lake_sites <- aquatic_sites %>%
-  filter(field_site_subtype == 'Lake')
-
-# Filter the targets
-targets <- targets %>%
-  filter(site_id %in% lake_sites$field_site_id,
-         variable == 'temperature')
-```
-
-
-```{r get-NOAA-past, message = F}
-
-# Past stacked weather
-noaa_past_s3 <- neon4cast::noaa_stage3()
-
-variables <- c("air_temperature", "eastward_wind", "northward_wind")
-#Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
-
-noaa_past <- noaa_past_s3  |> 
-  dplyr::filter(site_id %in% lake_sites$field_site_id,
-                datetime >= ymd('2017-01-01'),
-                variable %in% variables) |> 
-  dplyr::collect()
-
-# aggregate the past to mean values
-noaa_past_mean <- noaa_past |> 
-  mutate(datetime = as_date(datetime)) |> 
-  group_by(datetime, site_id, variable) |> 
-  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
-  pivot_wider(names_from = variable, values_from = prediction) |> 
-  # convert air temp to C
-  mutate(air_temperature = air_temperature - 273.15)
-
-```
-
-```{r get-NOAA-future, message = F}
-# Future weather
-# New forecast only available at 5am UTC the next day
-forecast_date <- Sys.Date() 
-noaa_date <- forecast_date - days(1)
-
-noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
-variables <- c("air_temperature", "eastward_wind", "northward_wind")
-
-noaa_future <- noaa_future_s3 |> 
-  dplyr::filter(datetime >= forecast_date,
-                site_id %in% lake_sites$field_site_id,
-                variable %in% variables) |> 
-  collect()
-
-noaa_future_daily <- noaa_future |> 
-  mutate(datetime = as_date(datetime)) |> 
-  # mean daily forecasts at each site per ensemble
-  group_by(datetime, site_id, parameter, variable) |> 
-  summarize(prediction = mean(prediction)) |>
-  pivot_wider(names_from = variable, values_from = prediction) |>
-  # convert to Celsius
-  mutate(air_temperature = air_temperature - 273.15) |> 
-  select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
-```
 
 ```{r model-setup}
 # Generate a dataframe to fit the model to 
