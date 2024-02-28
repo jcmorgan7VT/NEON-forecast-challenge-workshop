@@ -237,80 +237,98 @@ RW_forecasts_EFI |>
   facet_wrap(~site_id)
 ```
 
+
+
 ```{r}
-#determining the accuracy of the 31 day model
+#final version of my forecast code
 
-
-gg <- targets_use |> 
-  filter(site_id == "BARC") %>% 
-  mutate(my_xreg = rnorm(nrow(.))) |> 
-  fabletools::model(
-    arima = ARIMA(observation ~ my_xreg),
-    arima1 = ARIMA(observation),
-    lm = TSLM(observation ~ trend() + season()),
-    var = VAR(observation)
-  ) |> 
-  forecast(h = "31 days")
-gg |> 
-  accuracy(actual_obs)
-gg |> 
-  autoplot(level = c(95))
-
-gg <- targets_use |> 
-  filter(site_id == "BARC") %>% 
-  select(datetime, site_id, variable, observation, air) |> 
-  fabletools::model(arima = ARIMA(observation )) |> 
-  forecast(h = "31 days")
-
-gg |> 
-  accuracy(actual_obs)
-gg |> 
-  autoplot(level = c(95))
-
-tsibbledata::global_economy %>%
-  filter(Country == "Australia") %>%
-  model(ARIMA(log(GDP) ~ Population))
-
-#determin if my data is stationary
-test <- targets_use |> 
-  filter(site_id == "BARC")
-
-test |> ACF(observation) |>
-  autoplot() + labs(subtitle = "Observed water temp")
-#autocorrelation is very high 1 day and 21 days away
-#daily change is not a random amount-  auto correlated, indicating that the data is non-stationary
-test |> ACF(difference(observation))
-  autoplot() + 
-  labs(subtitle = "Changes in observed water temp")
-
-#testing tslm model  
-
-model(test, TSLM(observation ~ lagged + air_pressure + air_temperature + eastward_wind + northward_wind + precipitation_flux + relative_humidity + surface_downwelling_longwave_flux_in_air + surface_downwelling_shortwave_flux_in_air)) |>
-  report()
-
-test |> 
-  model(TSLM(observation ~ lagged + air_temperature + surface_downwelling_shortwave_flux_in_air)) |>
-  report()
-
-test |> 
-  model(TSLM(observation ~ lagged + air_temperature)) |> 
-  forecast()
-
-fit <- targets_use %>% 
-  fabletools::model(
-    #arima = ARIMA(observation),
-    lm = TSLM(observation ~ trend() + season()),
-    var = VAR(observation),
-    lm2 = TSLM(observation ~ lagged + air_temperature)
-  )
-fit |> 
-  forecast(h = "31 days") |> 
-  autoplot()
-
-report()
-
+#seperate training and test data (in the case of forecasts, test data is unknown)
 #trying again
+
+# read in the sites data
+aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
+  dplyr::filter(aquatics == 1)
+#pick an arbitrary day to start
+start <- ymd("2023-07-01")
+horizon <- ymd("2023-7-31")
+
+#copying fable method from text book
+#set up targets
+targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
+                    show_col_types = FALSE)
+max_horizon <- 31 #h from Quinn's script
+var <- "temperature"
+site <- "BARC"
+
+
+lake_sites <- aquatic_sites %>%
+  filter(field_site_subtype == 'Lake')
+
+# Past stacked weather
+noaa_past_s3 <- neon4cast::noaa_stage3()
+
+variables <- c("air_temperature", 
+               "air_pressure",
+               "relative_humidity",
+               "surface_downwelling_longwave_flux_in_air",
+               "surface_downwelling_shortwave_flux_in_air",
+               "precipitation_flux",
+               "eastward_wind", 
+               "northward_wind")
+#Other variable names can be found at https://projects.ecoforecast.org/neon4cast-docs/Shared-Forecast-Drivers.html#stage-3
+
+noaa_past <- noaa_past_s3  |> 
+  dplyr::filter(site_id %in% lake_sites$field_site_id,
+                datetime >= ymd('2017-01-01'),
+                variable %in% variables) |> 
+  dplyr::collect()
+
+# aggregate the past to mean values
+noaa_past_mean <- noaa_past |> 
+  mutate(datetime = as_date(datetime)) |> 
+  group_by(datetime, site_id, variable) |> 
+  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+  pivot_wider(names_from = variable, values_from = prediction) |> 
+  # convert air temp to C
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  dplyr::filter(datetime < start) #site_id == site & 
+
+forecast_sites <- unique(noaa_past_mean$site_id)
+#data input to train the model
+##########
+#add a lagged temperature column
+
+
+#atmospheric drivers to my horizon date
+#forecast_starts <- noaa_past_mean |> 
+  #dplyr::filter(datetime <= start) #|> 
+  #tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime')
+##########
+
+#get actual observationgs to see how good my model performed
+actual_obs <- targets |> 
+  dplyr::filter(site_id %in% forecast_sites,
+                variable == var,
+                datetime >= start,
+                datetime <= horizon) |> 
+  group_by(site_id) |> 
+  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
+  tsibble::fill_gaps()
+
+#calculating the horizon according to Quinn's method- might have to predcit from further out
 start <- "2023-05-31"
+max_horizon <- 35
+var <- "temperature"
+site <- "BARC"
+
+#calculate the horizon
+forecast_starts <- targets |> 
+  dplyr::filter(!is.na(observation) & site_id == site & variable == var) |> 
+  # Start the day after the most recent non-NA value
+  dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
+  dplyr::mutate(h = (Sys.Date() - start_date) + max_horizon,
+                h = as.numeric(h)) |>  # Horizon value
+  dplyr::ungroup()
 
 all_data <- targets |> 
   dplyr::filter(site_id %in% forecast_sites,
@@ -329,38 +347,7 @@ train <- all_data |>
 test <- all_data |> 
   dplyr::filter(datetime > start)
 
-train |> 
-  model(TSLM(observation ~ lagged + air_temperature)) |> 
-  #forecast(h = "31 days", new_data = test) |> 
-  report()
-```
-
-
-```{r}
-#trying to figure out why I can't run the linear model using the additional variable
-library(tsibbledata)
-library(fpp3)
-
-us_change |>
-  model(TSLM(Consumption ~ Income)) |>
-  report()
-
-fit_consMR <- us_change |>
-  model(tslm = TSLM(Consumption ~ Income + Production +
-                                    Unemployment + Savings))
-report(fit_consMR)
-
-augment(fit_consMR) |>
-  ggplot(aes(x = Quarter)) +
-  geom_line(aes(y = Consumption, colour = "Data")) +
-  geom_line(aes(y = .fitted, colour = "Fitted")) +
-  labs(y = NULL,
-    title = "Percent change in US consumption expenditure"
-  ) +
-  scale_colour_manual(values=c(Data="black",Fitted="#D55E00")) +
-  guides(colour = guide_legend(title = NULL))
-
-#applying this example to my data
+#filtering to just my site of interest for testing this workflow
 btrain <- train |> 
   filter(site_id == "BARC")
 btest <- test |> 
@@ -368,48 +355,40 @@ btest <- test |>
 ball <- all_data |> 
   filter(site_id == "BARC")
 
-btest2 <- btest
-btest2$observation <- NA
-btest2$lagged <- NA
-
-btrain2 <- bind_rows(btrain, btest2)
-ball |>
-  model(TSLM(observation ~ lagged)) |>
-  report()
-
-btrain |>
-  model(tslm = TSLM(observation ~ air_temperature + lag(observation))) |> 
-  forecast(new_data = btest) |> 
-  autoplot()+
-  geom_line(data =  filter(btrain, datetime > "2023-01-01"), aes(x = datetime, y = observation))+
-  geom_point(data = btest,  aes(x = datetime, y = observation))
-#doesn't work when I do forecast- is this because it is missing the lagged and air_temperature?
-
+#train the model on training data
 my_model <- btrain |>
   model(tslm = TSLM(observation ~ air_temperature + lag(observation)))
+#arima = ARIMA(observation)
+gg |> 
+  accuracy(actual_obs)
+gg |> 
+  autoplot(level = c(95))
 
+#forecast into the future with test data
 my_model |> 
-  generate(h = "31 days", new_data = btest) |> 
-  autoplot(.sim)+
+  forecast(new_data = btest) |> 
+  autoplot(level = 95) + 
+  geom_line(data =  filter(btrain, datetime > "2023-04-01"), aes(x = datetime, y = observation))+
   geom_point(data = btest,  aes(x = datetime, y = observation))
 
+#create ensemble members for forecast submission
+#can use generater for arima, but not for the linear model
+my_model |> 
+  generate(h = "31 days", new_data = btest, bootstrap = TRUE,  times = 5) |> 
+  autoplot(.sim)
 
-augment(bfit) |>
-  ggplot(aes(x = datetime)) +
-  geom_line(aes(y = observation, colour = "Data")) +
-  geom_line(aes(y = .fitted, colour = "Fitted")) +
-  labs(y = NULL,
-    title = "Water temperature in BARC"
-  ) +
-  scale_colour_manual(values=c(Data="black",Fitted="blue")) +
-  guides(colour = guide_legend(title = NULL))
-
-#have a working model, but I cannot figure out how to include a lagged term. It is not moving iteratively, so how do I include the freshest prediciton from the day before?
-
-# i think i mightve done it in the code above?
-
+#reformat forecast for submission
+RW_forecasts_EFI <- forecast %>%
+  rename(parameter = .rep,
+         prediction = .sim) %>%
+  # For the EFI challenge we only want the forecast for future
+  #filter(datetime > Sys.Date()) %>%
+  group_by(site_id, variable) %>%
+  mutate(reference_datetime = Sys.Date(),
+         family = "ensemble",
+         model_id = "persistenceRW") %>%
+  select(model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
 ```
-
 
 ```{r get-targets, message=F}
 #read in the targets data
