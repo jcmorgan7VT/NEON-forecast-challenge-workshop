@@ -14,13 +14,6 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ```{r load-packages, echo = F, warning=F, message=F}
-## install.packages('remotes')
-## install.packages('fpp3') # package for applying simple forecasting methods
-## install.packages('tsibble') # package for dealing with time series data sets and tsibble objects
-## install.packages('tidyverse') # collection of R packages for data manipulation, analysis, and visualisation
-## install.packages('lubridate') # working with dates and times
-#remotes::install_github('eco4cast/neon4cast') # package from NEON4cast challenge organisers to assist with forecast building and submission
-
 # Load packages
 library(tidyverse)
 library(lubridate)
@@ -29,7 +22,6 @@ library(fable)
 library(neon4cast)
 library(feasts)
 library(urca)
-
 ```
 
 
@@ -41,16 +33,17 @@ library(urca)
 #get the names of the lakes that I am supposed to forecast
 aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
   dplyr::filter(aquatics == 1)
+
 lake_sites <- aquatic_sites %>%
   filter(field_site_subtype == 'Lake')
 
+forecast_sites <- unique(lake_sites$field_site_id)
 #set up targets
 targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
                     show_col_types = FALSE)
-
 # Filter the targets
 targets <- targets %>%
-  filter(site_id %in% lake_sites$field_site_id,
+  filter(site_id %in% forecast_sites,
          variable == 'temperature')
 
 # Past stacked weather
@@ -59,7 +52,7 @@ noaa_past_s3 <- neon4cast::noaa_stage3()
 variables <- c("air_temperature")
 
 noaa_past <- noaa_past_s3  |> 
-  dplyr::filter(site_id %in% lake_sites$field_site_id,
+  dplyr::filter(site_id %in% forecast_sites,
                 datetime >= ymd('2017-01-01'),
                 variable == variables) |> 
   dplyr::collect()
@@ -74,9 +67,6 @@ noaa_past_mean <- noaa_past |>
   mutate(air_temperature = air_temperature - 273.15) |> 
   dplyr::filter(datetime < start) #site_id == site & 
 
-forecast_sites <- unique(noaa_past_mean$site_id)
-
-
 # Future weather- get future weather to make forecast
 # New forecast only available at 5am UTC the next day
 forecast_date <- Sys.Date() 
@@ -90,7 +80,7 @@ noaa_future <- noaa_future_s3 |>
                 site_id %in% lake_sites$field_site_id,
                 variable %in% variables) |> 
   collect()
-
+#future forecast ensembles
 noaa_future_daily <- noaa_future |> 
   mutate(datetime = as_date(datetime)) |> 
   # mean daily forecasts at each site per ensemble
@@ -101,34 +91,23 @@ noaa_future_daily <- noaa_future |>
   mutate(air_temperature = air_temperature - 273.15) |> 
   select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
 
-#get actual observationgs to see how good my model performed
-actual_obs <- targets |> 
-  dplyr::filter(site_id %in% forecast_sites,
-                variable == var,
-                datetime >= start,
-                datetime <= horizon) |> 
-  group_by(site_id) |> 
-  tsibble::as_tsibble(key = c('variable', 'site_id'), index = 'datetime') |>
-  tsibble::fill_gaps()
-
 #calculating the horizon according to Quinn's method- might have to predcit from further out
-start <- "2023-05-31"
-max_horizon <- 35
-var <- "temperature"
-site <- "BARC"
+#noaa_date - variable assigned above, start of forecast
+#ideal horizon, but might not be- actual forecast horizon determined below
+horizon_length <- days(31)
+horizon_date <- noaa_date + horizon_length
+site <- "CRAM"
 
-#pick an arbitrary day to start
-start <- ymd("2023-07-01")
-horizon <- ymd("2023-7-31")
 #calculate the horizon
 forecast_starts <- targets |> 
-  dplyr::filter(!is.na(observation) & site_id == site & variable == var) |> 
+  dplyr::filter(!is.na(observation) & site_id == site) |> 
   # Start the day after the most recent non-NA value
   dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
   dplyr::mutate(h = (Sys.Date() - start_date) + max_horizon,
                 h = as.numeric(h)) |>  # Horizon value
   dplyr::ungroup()
 
+# join the atmospheric drivers with the observations to build the model
 all_data <- targets |> 
   dplyr::filter(site_id %in% forecast_sites,
                 variable == var)  |> 
@@ -140,6 +119,7 @@ all_data <- targets |>
   tsibble::as_tsibble(key = c('site_id'), index = 'datetime') |>
   tsibble::fill_gaps()
 
+#train vs test split not necessary from existing data, use the s2 forecasts for drivers
 train <- all_data |> 
   dplyr::filter(datetime < start)
 
