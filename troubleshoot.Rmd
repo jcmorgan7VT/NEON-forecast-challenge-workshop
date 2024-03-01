@@ -97,7 +97,7 @@ noaa_past_mean <- noaa_past |>
   
 #summary(noaa_past_mean) #up to 27th
 
-noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
+noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date - 1))
 
 noaa_future <- noaa_future_s3 |> 
   dplyr::filter(datetime > forecast_starts$start_date,
