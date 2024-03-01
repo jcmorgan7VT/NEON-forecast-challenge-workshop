@@ -100,7 +100,7 @@ noaa_past_mean <- noaa_past |>
 noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date - 1))
 
 noaa_future <- noaa_future_s3 |> 
-  dplyr::filter(datetime > forecast_starts$start_date,
+  dplyr::filter(datetime >= forecast_date,
                 site_id %in% lake_sites$field_site_id,
                 variable %in% variables) |> 
   collect()
