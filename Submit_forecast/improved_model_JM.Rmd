@@ -46,6 +46,28 @@ targets <- targets %>%
   filter(site_id %in% forecast_sites,
          variable == 'temperature')
 
+#calculating the horizon according to Quinn's method- might have to predcit from further out
+#noaa_date - variable assigned above, start of forecast
+#ideal horizon, but might not be- actual forecast horizon determined below
+forecast_date <- Sys.Date() 
+noaa_date <- forecast_date - days(1)
+
+horizon_length <- days(31)
+horizon_date <- noaa_date + horizon_length
+#create for loop to go through all of the sites
+site <- "BARC" #CRAM
+
+#calculate the horizon
+forecast_starts <- targets |> 
+  dplyr::filter(!is.na(observation) & site_id == site) |> 
+  # Start the day after the most recent non-NA value
+  dplyr::summarise(start_date = max(datetime) - lubridate::days(2)) |>  # Date
+  dplyr::mutate(h = (Sys.Date() - start_date) + 31,
+                h = as.numeric(h)) |>  # Horizon value
+  dplyr::ungroup()
+forecast_starts
+#summary(forecast_starts)
+
 # Past stacked weather
 noaa_past_s3 <- neon4cast::noaa_stage3()
 
@@ -53,9 +75,10 @@ variables <- c("air_temperature")
 
 noaa_past <- noaa_past_s3  |> 
   dplyr::filter(site_id %in% forecast_sites,
-                datetime >= ymd('2017-01-01'),
+                #datetime >= ymd('2017-01-01'),
                 variable == variables) |> 
   dplyr::collect()
+
 
 # aggregate the past to mean values
 noaa_past_mean <- noaa_past |> 
@@ -65,96 +88,123 @@ noaa_past_mean <- noaa_past |>
   pivot_wider(names_from = variable, values_from = prediction) |> 
   # convert air temp to C
   mutate(air_temperature = air_temperature - 273.15) |> 
-  dplyr::filter(datetime < start) #site_id == site & 
+  dplyr::filter(#datetime < forecast_starts$start_date,
+                site_id == site) #site_id == site & 
+summary(noaa_past_mean)
 
 # Future weather- get future weather to make forecast
-# New forecast only available at 5am UTC the next day
-forecast_date <- Sys.Date() 
-noaa_date <- forecast_date - days(1)
+#forecasts only available for 35 days from start date, so to forecast from further back in time need to collect multiple noaa forecasts
 
-noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
-variables <- c("air_temperature")
+#instead of doing this, get the s3 forecast for as far back as it goes, then add one s2
+#calculate number of forecasts back
 
-noaa_future <- noaa_future_s3 |> 
-  dplyr::filter(datetime >= forecast_date,
-                site_id %in% lake_sites$field_site_id,
-                variable %in% variables) |> 
-  collect()
+noaa_future_s3 <- neon4cast::noaa_stage2(start_date = noaa_date)
+
+  noaa_future <- noaa_future_s3 |> 
+    dplyr::filter(#datetime >= forecast_starts$start_date,
+                  site_id == site,
+                  variable %in% variables) |> 
+    collect()
 #future forecast ensembles
 noaa_future_daily <- noaa_future |> 
-  mutate(datetime = as_date(datetime)) |> 
+    mutate(datetime = as_date(datetime)) |> 
   # mean daily forecasts at each site per ensemble
-  group_by(datetime, site_id, parameter, variable) |> 
-  summarize(prediction = mean(prediction)) |>
-  pivot_wider(names_from = variable, values_from = prediction) |>
+    group_by(datetime, site_id, parameter, variable) |> 
+    summarize(prediction = mean(prediction)) |>
+    pivot_wider(names_from = variable, values_from = prediction) |>
   # convert to Celsius
-  mutate(air_temperature = air_temperature - 273.15) |> 
-  select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
-
-#calculating the horizon according to Quinn's method- might have to predcit from further out
-#noaa_date - variable assigned above, start of forecast
-#ideal horizon, but might not be- actual forecast horizon determined below
-horizon_length <- days(31)
-horizon_date <- noaa_date + horizon_length
-site <- "CRAM"
-
-#calculate the horizon
-forecast_starts <- targets |> 
-  dplyr::filter(!is.na(observation) & site_id == site) |> 
-  # Start the day after the most recent non-NA value
-  dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
-  dplyr::mutate(h = (Sys.Date() - start_date) + max_horizon,
-                h = as.numeric(h)) |>  # Horizon value
-  dplyr::ungroup()
+    mutate(air_temperature = air_temperature - 273.15)|> 
+    ungroup() |> 
+  group_by(site_id) |> 
+    select(datetime, site_id, parameter, air_temperature) |> 
+    dplyr::filter(datetime > forecast_starts$start_date,
+                  datetime <= forecast_starts$start_date + forecast_starts$h) #site_id == site & 
+  
+summary(noaa_future_daily)
+  
+s3_past <- noaa_past_mean |> 
+  dplyr::filter(datetime >= forecast_starts$start_date - 1,
+                datetime < noaa_date) |> 
+  # select(-site_id) |> 
+  mutate(parameter = 1)#,
+       #  observation = as.numeric(NA))
 
 # join the atmospheric drivers with the observations to build the model
-all_data <- targets |> 
-  dplyr::filter(site_id %in% forecast_sites,
-                variable == var)  |> 
+train <- targets |> 
+  dplyr::filter(site_id == site)  |> 
   group_by(site_id) |>
-  right_join(noaa_past_mean, by = join_by(datetime, site_id)) |> 
-  mutate(lagged = lag(observation, default = NA)) |> 
-  select(datetime, site_id, observation, lagged, air_temperature) |> 
-  #pivot_longer(!c(datetime, site_id), names_to = "variable", values_to = "value") |> 
-  tsibble::as_tsibble(key = c('site_id'), index = 'datetime') |>
+  right_join(filter(noaa_past_mean, datetime <= forecast_starts$start_date), by = join_by(datetime, site_id)) |> 
+  #ungroup() |>
+  select(datetime, site_id, observation, air_temperature) #|> 
+  #mutate(parameter = 1) |> 
+  #tsibble::as_tsibble(key = c('site_id'), index = 'datetime') |>
+  #tsibble::fill_gaps()
+
+# create a parameter column for the s3, then bind the rows of the s3 and the s2
+test <- dplyr::bind_rows(s3_past, noaa_future_daily) |> 
+  mutate(observation = as.numeric(NA))
+# make the first value of the testing data available
+#also figure out how to include an additional row at the beginning
+test$observation[test$datetime == forecast_starts$start_date] <- train$observation[train$datetime == forecast_starts$start_date]
+test$observation[test$datetime == forecast_starts$start_date - 1] <- train$observation[train$datetime == forecast_starts$start_date - 1]
+
+
+test <- test |> 
+  #select(datetime, air_temperature, parameter, observation) |> 
+  #filter(parameter == 1) |> 
+  tsibble::as_tsibble(key = c("site_id", 'parameter'), index = 'datetime') |>
   tsibble::fill_gaps()
 
-#train vs test split not necessary from existing data, use the s2 forecasts for drivers
-train <- all_data |> 
-  dplyr::filter(datetime < start)
 
-test <- all_data |> 
-  dplyr::filter(datetime > start)
+#this is the test data
+summary(test)
 
-#filtering to just my site of interest for testing this workflow
-btrain <- train |> 
-  filter(site_id == "BARC")
-btest <- test |> 
-  filter(site_id == "BARC")
-ball <- all_data |> 
-  filter(site_id == "BARC")
 
+
+
+#old code to replicate training data
+train2 <- replicate(31, train, simplify = FALSE) %>%
+  imap_dfr(~ .x %>%
+         mutate(parameter = as.numeric(.y)))
+
+
+train2$parameter <- train2$parameter - 1
+# 
+train2 <- train2 |>
+  tsibble::as_tsibble(key = c("site_id", 'parameter'), index = 'datetime') |>
+  tsibble::fill_gaps()
+summary(train2)
+
+
+
+#Train the model on one ensemble, then run it on each ensemble individually
 #train the model on training data
-my_model <- btrain |>
-  model(tslm = TSLM(observation ~ air_temperature + lag(observation)))
+default_temp <- train$observation[train$datetime == forecast_starts$start_date]
+
+my_model <- train2 |>
+  model(tslm = VAR(vars(observation) ~ xreg(air_temperature + lag(observation, n = 1, default = default_temp))))
 #arima = ARIMA(observation)
-gg |> 
-  accuracy(actual_obs)
-gg |> 
-  autoplot(level = c(95))
+my_model |> 
+  glance()
+
+#test_p <- filter(test, parameter == 1)
+  
+happy <- new_data(train2, n = 37, keep_all = TRUE) |> 
+  mutate(air_temperature = test$air_temperature)
+
+my_model |> 
+  forecast(train2)
+forecast <- my_model |>  
+  fabletools::generate(new_data = test, h = forecast_starts$h, bootstrap = T, times = 200)
+
+  interpolate(my_model, test)
 
 #forecast into the future with test data
 my_model |> 
-  forecast(new_data = btest) |> 
+  forecast(new_data = test) |> 
   autoplot(level = 95) + 
-  geom_line(data =  filter(btrain, datetime > "2023-04-01"), aes(x = datetime, y = observation))+
-  geom_point(data = btest,  aes(x = datetime, y = observation))
-
-#create ensemble members for forecast submission
-#can use generater for arima, but not for the linear model
-my_model |> 
-  generate(h = "31 days", new_data = btest, bootstrap = TRUE,  times = 5) |> 
-  autoplot(.sim)
+  geom_line(data =  filter(train, datetime > "2023-04-01"), aes(x = datetime, y = observation))+
+  geom_point(data = test,  aes(x = datetime, y = observation))
 
 #reformat forecast for submission
 RW_forecasts_EFI <- forecast %>%
@@ -170,6 +220,26 @@ RW_forecasts_EFI <- forecast %>%
 ```
 
 
+
+FORGET THIS------ I CAN DO IT THE NEW WAY
+Trying to start from old code again
+```{r get-targets, message=F}
+#read in the targets data
+targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz')
+
+# read in the sites data
+aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
+  dplyr::filter(aquatics == 1)
+
+lake_sites <- aquatic_sites %>%
+  filter(field_site_subtype == 'Lake')
+
+# Filter the targets
+targets <- targets %>%
+  filter(site_id %in% lake_sites$field_site_id,
+         variable == 'temperature')
+```
+
 ```{r model-setup}
 # Generate a dataframe to fit the model to 
 targets_lm <- targets |> 
@@ -182,6 +252,174 @@ targets_lm <- targets |>
 temp_lm_forecast <- NULL
 
 ```
+
+```{r get-NOAA-past, message = F}
+
+# Past stacked weather
+noaa_past_s3 <- neon4cast::noaa_stage3()
+
+variables <- c("air_temperature")
+
+noaa_past <- noaa_past_s3  |> 
+  dplyr::filter(site_id %in% lake_sites$field_site_id,
+                datetime >= ymd('2017-01-01'),
+                variable %in% variables) |> 
+  dplyr::collect()
+
+# aggregate the past to mean values
+noaa_past_mean <- noaa_past |> 
+  mutate(datetime = as_date(datetime)) |> 
+  group_by(datetime, site_id, variable) |> 
+  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+  pivot_wider(names_from = variable, values_from = prediction) |> 
+  # convert air temp to C
+  mutate(air_temperature = air_temperature - 273.15)
+
+```
+
+
+
+```{r get-NOAA-future, message = F}
+# Future weather
+# New forecast only available at 5am UTC the next day
+forecast_date <- Sys.Date() 
+noaa_date <- forecast_date - days(1)
+
+noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
+variables <- c("air_temperature", "eastward_wind", "northward_wind")
+
+noaa_future <- noaa_future_s3 |> 
+  dplyr::filter(datetime >= forecast_date,
+                site_id %in% lake_sites$field_site_id,
+                variable %in% variables) |> 
+  collect()
+
+noaa_future_daily <- noaa_future |> 
+  mutate(datetime = as_date(datetime)) |> 
+  # mean daily forecasts at each site per ensemble
+  group_by(datetime, site_id, parameter, variable) |> 
+  summarize(prediction = mean(prediction)) |>
+  pivot_wider(names_from = variable, values_from = prediction) |>
+  # convert to Celsius
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  select(datetime, site_id, air_temperature, eastward_wind, northward_wind, parameter)
+```
+
+
+```{r model-setup}
+# Generate a dataframe to fit the model to 
+targets_lm <- targets |> 
+  filter(variable == 'temperature') |>
+  pivot_wider(names_from = 'variable', values_from = 'observation') |> 
+  left_join(noaa_past_mean, 
+            by = c("datetime","site_id"))
+
+# Loop through each site to fit the model
+temp_lm_forecast <- NULL
+
+```
+
+
+```{r}
+#code ripped from Mary's module 6, set up for including uncertainty
+forecast_start_date <- forecast_date
+
+
+#number of days we are predicting into the future
+forecast_horizon <- 31
+#vector of dates that we want to predict for
+forecasted_dates <- seq(from = ymd(forecast_start_date), to = ymd(forecast_start_date) + forecast_horizon, by = "day")
+```
+
+
+```{r}
+forecast_df <- NULL
+#for loop to fit a linear regression on every site
+#for(i in 1:length(lake_sites$field_site_id)) {  
+  i <- 1
+  example_site <- lake_sites$field_site_id[i]
+  
+  #past data to build the lm
+  site_target <- targets_lm |>
+    filter(site_id == example_site) |> 
+    tsibble::as_tsibble(key = c('site_id'), index = 'datetime') |>
+    tsibble::fill_gaps()
+
+  #future data to run on the lm
+  noaa_future_site <- noaa_future_daily |> 
+    filter(site_id == example_site) %>% 
+    filter(datetime <= max(forecasted_dates))
+  
+  #fitting linear model to past data
+  my_model <- site_target |>
+    model(tslm = TSLM(temperature ~ air_temperature + lag(temperature)))
+  
+  fit_sum <- summary(fit)
+  fit_sum_df <- as.data.frame(fit_sum$coefficients)
+  
+  #coeffs <- round(fit$coefficients, 2)
+  coeffs <- fit_sum_df[,1]
+  params_se <- fit_sum_df[,2]
+
+
+  #create df containing distribution of parameter uncertainty, done for each new lm for each site
+  param_df <- data.frame(b_beta = rnorm(31, coeffs[1], params_se[1]),
+                         airT_beta = rnorm(31, coeffs[2], params_se[2]),
+                         eWind_beta = rnorm(31, coeffs[3], params_se[3]),
+                         nWind_beta = rnorm(31, coeffs[4], params_se[4]))
+
+  #Process uncertainty- uncertainty due to how we model or represent this system
+  mod <- predict(fit, site_target)
+  residuals <- mod - site_target$temperature
+  sigma <- sd(residuals, na.rm = TRUE) # Process Uncertainty Noise Std Dev.; this is your sigma
+  process_unc <- rnorm(n = 31, mean = 0, sd = sigma)
+
+  # initial condition uncertainty- not included bc I don't have any antecedent conditions
+  #ic_sd <- 0.1 
+  #ic_uc <- rnorm(n = n_members, mean = curr_wt, sd = ic_sd)
+
+  #run a model run for each ensemble member, incorporating the different sources of uncertainty
+  for(x in 1:length(forecasted_dates)) {
+    # use linear regression to forecast water temperature for each ensemble member
+    #iterating through each day, so filter for day each day individually to predict
+    site_drivers <- noaa_future_site %>%
+      filter(datetime == forecasted_dates[x]) %>% 
+      bind_cols(param_df)
+    #defining components of the multi-linear regression- using ones with uncertainty
+    b <- site_drivers$b_beta
+    airT <- site_drivers$air_temperature * site_drivers$airT_beta
+    east <- site_drivers$eastward_wind * site_drivers$eWind_beta
+    west <- site_drivers$northward_wind * site_drivers$nWind_beta
+
+    #multi linear regression
+    forecasted_temperature <- b + airT + east + west + process_unc
+    
+    # put all the relevant information into a tibble that we can bind together
+    # site_drivers$prediction <- forecasted_temperature
+    # if(x == 1) loop2 <- site_drivers
+    # if(x > 1) loop2 <- dplyr::bind_rows(loop2, site_drivers)
+    
+    curr_site_df <- tibble(datetime = rep(forecasted_dates[x], times = 31),
+                         site_id = example_site,
+                         parameter = 0:30,
+                         prediction = forecasted_temperature,
+                         variable = "temperature") #Change this if you are forecasting a different variable
+  
+  forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
+    
+
+  }
+    
+  
+  
+  #temp_lm_forecast <- dplyr::bind_rows(temp_lm_forecast, loop2)
+  message(example_site, ' temperature forecast run')
+  
+}
+```
+
+
+
 
 
 ```{r}

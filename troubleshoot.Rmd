@@ -1,0 +1,226 @@
+---
+title: "Working improved forecast 2_29_24"
+author: "John Morgan"
+date: "2024-02-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Copy and pasted from JM_first_forecast, then modified to test out different modeling frameworks.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load-packages, echo = F, warning=F, message=F}
+# Load packages
+library(tidyverse)
+library(lubridate)
+library(tsibble)
+library(fable)
+library(neon4cast)
+library(feasts)
+library(urca)
+```
+
+
+
+```{r}
+#final version of my forecast code
+
+# read in the sites data
+#get the names of the lakes that I am supposed to forecast
+aquatic_sites <- read_csv("https://raw.githubusercontent.com/eco4cast/neon4cast-targets/main/NEON_Field_Site_Metadata_20220412.csv") |>
+  dplyr::filter(aquatics == 1)
+
+lake_sites <- aquatic_sites %>%
+  filter(field_site_subtype == 'Lake')
+
+forecast_sites <- unique(lake_sites$field_site_id)
+#set up targets
+targets <- read_csv('https://data.ecoforecast.org/neon4cast-targets/aquatics/aquatics-targets.csv.gz',
+                    show_col_types = FALSE)
+# Filter the targets
+targets <- targets %>%
+  filter(site_id %in% forecast_sites,
+         variable == 'temperature')
+summary(targets)
+# Future weather- get future weather to make forecast
+# New forecast only available at 5am UTC the next day
+forecast_date <- Sys.Date() 
+noaa_date <- forecast_date - days(1)
+horizon_length <- days(31)
+horizon_date <- noaa_date + horizon_length
+
+#empty dataframe for model results
+forecast_df <- NULL
+
+for(i in 1:length(forecast_sites)) {  
+  
+  site <- forecast_sites[i]
+
+
+#calculate the horizon
+forecast_starts <- targets |> 
+  dplyr::filter(!is.na(observation) & site_id == site) |> 
+  # Start the day after the most recent non-NA value
+  dplyr::summarise(start_date = max(datetime) + lubridate::days(1)) |>  # Date
+  dplyr::mutate(h = (Sys.Date() - start_date) + 31,
+                h = as.numeric(h)) |>  # Horizon value
+  dplyr::ungroup()
+
+#forecast_starts
+
+# Past stacked weather
+noaa_past_s3 <- neon4cast::noaa_stage3()
+
+variables <- c("air_temperature")
+
+noaa_past <- noaa_past_s3  |> 
+  dplyr::filter(site_id %in% forecast_sites,
+                #datetime >= ymd('2017-01-01'),
+                variable == variables) |> 
+  dplyr::collect()
+
+
+# aggregate the past to mean values
+noaa_past_mean <- noaa_past |> 
+  mutate(datetime = as_date(datetime)) |> 
+  group_by(datetime, site_id, variable) |> 
+  summarize(prediction = mean(prediction, na.rm = TRUE), .groups = "drop") |> 
+  pivot_wider(names_from = variable, values_from = prediction) |> 
+  # convert air temp to C
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  dplyr::filter(datetime < forecast_starts$start_date,
+                site_id == site) #site_id == site & 
+  
+#summary(noaa_past_mean) #up to 27th
+
+noaa_future_s3 <- neon4cast::noaa_stage2(start_date = as.character(noaa_date))
+
+noaa_future <- noaa_future_s3 |> 
+  dplyr::filter(datetime > forecast_starts$start_date,
+                site_id %in% lake_sites$field_site_id,
+                variable %in% variables) |> 
+  collect()
+#future forecast ensembles
+noaa_future_daily <- noaa_future |> 
+  mutate(datetime = as_date(datetime)) |> 
+  # mean daily forecasts at each site per ensemble
+  group_by(datetime, site_id, parameter, variable) |> 
+  summarize(prediction = mean(prediction)) |>
+  pivot_wider(names_from = variable, values_from = prediction) |>
+  # convert to Celsius
+  mutate(air_temperature = air_temperature - 273.15) |> 
+  mutate(observation = NA) |> 
+  select(datetime, site_id, observation, air_temperature, parameter) |> 
+  filter(site_id == site)
+
+#summary(noaa_future_daily) #from the 28th onward
+#calculating the horizon according to Quinn's method- might have to predcit from further out
+#noaa_date - variable assigned above, start of forecast
+#ideal horizon, but might not be- actual forecast horizon determined below
+for(i in 1:31){
+  one_ensemble <- filter(noaa_future_daily, parameter == i-1) |> 
+    ungroup() |> 
+    group_by(site_id) |> 
+    select(-parameter)
+
+  #summary(one_ensemble)
+  #summary(targets)
+  #summary(noaa_past_mean)
+
+# join the atmospheric drivers with the observations to build the model
+all_data <- targets |> #targets goes up to 27
+  dplyr::filter(site_id == site)  |> 
+  select(-variable) |> 
+  group_by(site_id) |>
+  right_join(noaa_past_mean, by = join_by(datetime, site_id)) |> 
+#summary(all_data)
+  bind_rows(one_ensemble) |> 
+  mutate(lagged = lag(observation, default = NA)) |> 
+  #select(datetime, site_id, observation, lagged, air_temperature) |> 
+  #pivot_longer(!c(datetime, site_id), names_to = "variable", values_to = "value") |> 
+  tsibble::as_tsibble(key = c('site_id'), index = 'datetime') |> 
+  tsibble::fill_gaps()
+
+
+
+#train vs test split not necessary from existing data, use the s2 forecasts for drivers
+train <- all_data |> 
+  dplyr::filter(datetime < forecast_starts$start_date)
+
+test <- all_data |> 
+  dplyr::filter(datetime >= forecast_starts$start_date)
+
+#filtering to just my site of interest for testing this workflow
+
+#train the model on training data
+my_model <- train |>
+  model(tslm = TSLM(observation ~ air_temperature + trend() + season()))
+#arima = ARIMA(observation)
+
+#forecast into the future with test data
+output <- my_model |> 
+  generate(new_data = test, bootstrap = T, times = 10) |> 
+  select(site_id, .rep, datetime, .sim)
+  
+
+#create ensemble members for forecast submission
+#can use generater for arima, but not for the linear model
+# my_model |> 
+#   generate(h = "31 days", new_data = btest, bootstrap = TRUE,  times = 5) |> 
+#   autoplot(.sim)
+
+  forecast_df <- dplyr::bind_rows(forecast_df, as.data.frame(output))
+}
+
+#end of ensemble member loop
+
+}
+#reformat forecast for submission
+RW_forecasts_EFI <- forecast_df %>%
+  rename(parameter = .rep,
+         prediction = .sim) %>%
+  # For the EFI challenge we only want the forecast for future
+  #filter(datetime > Sys.Date()) %>%
+  group_by(site_id) %>%
+  mutate(reference_datetime = Sys.Date(),
+         family = "ensemble",
+         variable = "temperature",
+         model_id = "TSLM_seasonal_JM",
+         project_id = "neon4cast") %>%
+  select(project_id, model_id, datetime, reference_datetime, site_id, family, parameter, variable, prediction)
+```
+
+
+
+```{r write-forecast}
+# Write the forecast to file
+theme <- 'aquatics'
+date <- RW_forecasts_EFI$reference_datetime[1]
+forecast_name_1 <- paste0(RW_forecasts_EFI$model_id[1], ".csv")
+forecast_file_1 <- paste(theme, date, forecast_name_1, sep = '-')
+forecast_file_1
+
+write_csv(RW_forecasts_EFI, forecast_file_1)
+
+neon4cast::forecast_output_validator(file.path(forecast_file_1))
+
+```
+
+
+```{r submit-forecast}
+
+## # can uses the neon4cast::forecast_output_validator() to check the forecast is in the right format
+
+# UNCOMMMENT THIS WHEN YOU ARE READY TO SUBMIT
+neon4cast::submit(forecast_file = file.path(forecast_file_1),
+                   ask = F) # if ask = T (default), it will produce a pop-up box asking if you want to submit
+
+
+```
+
+
+This markdown represents a long struggle, and eventual compromise. I battled against adding a lag term to fable, but ultimately could not get it to work. I instead settled for a recommended TSLM method, to use the built in trend and season regressors in the TSLM modelling framework. Water temperature varies seasonally in every lake, so I thought this would be an appropriate framework to make predictions based off of. Additionally, I captured process uncertainty by conducting 10 bootstrap simulations for each NOAA ensemble member for each lake site, resulting in 300 equally likely ensemble members per site. Fable incorporates all but driver uncertainty, which I did not account for because I did not end up using a lagged term. In the future I hope to incorporate a lagged water temperature term- I think it presents the most effective and most elegant way to predict the water temperature.
