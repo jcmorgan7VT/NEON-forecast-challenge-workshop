@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
           
       - name: Run automatic prediction file
-        run: Rscript -e 'rmarkdown::render(input = "Submit_forecast/JM_first_forecast.Rmd")'
+        run: Rscript -e 'rmarkdown::render(input = "troubleshoot.Rmd")'
         
       - name: commit + push output
         run: |
